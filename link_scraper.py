@@ -60,11 +60,31 @@ def main() -> None:
         return
 
     output_path = Path("links.txt")
+    existing_links: List[str] = []
+    if output_path.exists():
+        for line in output_path.read_text(encoding="utf-8").splitlines():
+            entry = line.strip()
+            if entry.endswith(","):
+                entry = entry[:-1].strip()
+            if entry:
+                existing_links.append(entry)
+
+    existing_set = set(existing_links)
+    new_links = [href for href in links if href not in existing_set]
+
+    if not new_links:
+        print("No new listing links found. Existing file left unchanged.")
+        return
+
+    combined_links = new_links + existing_links
+
     with output_path.open("w", encoding="utf-8") as handle:
-        for href in links:
+        for href in combined_links:
             handle.write(f"{href},\n")
 
-    print(f"Saved {len(links)} links to {output_path}")
+    print(
+        f"Added {len(new_links)} new link(s). {len(combined_links)} total entries saved to {output_path}."
+    )
 
 
 if __name__ == "__main__":
