@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Iterable, List
 
@@ -78,6 +79,8 @@ def main() -> None:
         print("Geçerli bir link girilmedi. Çıkılıyor.")
         return
 
+    start_time = time.perf_counter()
+
     try:
         _run_link_scraper(url)
     except RuntimeError as exc:
@@ -130,7 +133,13 @@ def main() -> None:
             f"{batch_index}. JSON dosyası oluşturuldu ({output_path}) - {len(batch)} ilan içeriyor."
         )
 
-    print("Tüm linkler işlendi, görev tamamlandı.")
+    elapsed_seconds = time.perf_counter() - start_time
+    total_seconds = round(elapsed_seconds)
+    minutes, seconds = divmod(total_seconds, 60)
+    print(
+        "Tüm linkler işlendi, görev tamamlandı. "
+        f"Süre: {minutes} dakika {seconds} saniye."
+    )
 
 
 if __name__ == "__main__":

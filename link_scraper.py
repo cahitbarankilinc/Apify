@@ -68,7 +68,7 @@ def main() -> None:
     seen_links: Set[str] = set()
 
     previous_url = None
-    for page in range(1, 21):
+    for page in range(1, 51):
         page_url = _with_page(url, page)
 
         if page > 1 and page_url == previous_url:
