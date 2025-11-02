@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
+import os
+import zlib
 from pathlib import Path
 from typing import Optional
-import os
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -77,6 +79,32 @@ def _build_request(url: str) -> Request:
     return Request(url, headers=headers)
 
 
+def _decode_content(content: bytes, encoding: Optional[str]) -> bytes:
+    """Decompress the response body when the server applies gzip/deflate."""
+
+    if not encoding:
+        return content
+
+    normalized = encoding.lower()
+
+    if "gzip" in normalized:
+        try:
+            return gzip.decompress(content)
+        except OSError:
+            return content
+
+    if "deflate" in normalized:
+        try:
+            return zlib.decompress(content)
+        except zlib.error:
+            try:
+                return zlib.decompress(content, -zlib.MAX_WBITS)
+            except zlib.error:
+                return content
+
+    return content
+
+
 def download_listing(url: str) -> Path:
     """Fetch the listing URL and persist the HTML under `lisitings/`.
 
@@ -90,7 +118,8 @@ def download_listing(url: str) -> Path:
     try:
         opener = build_opener(HTTPCookieProcessor(CookieJar()))
         with opener.open(request) as response:  # type: ignore[call-arg]
-            content = response.read()
+            raw_content = response.read()
+            content = _decode_content(raw_content, response.headers.get("Content-Encoding"))
     except HTTPError as exc:  # pragma: no cover - network errors depend on runtime
         hint = ""
         if exc.code == 403:
