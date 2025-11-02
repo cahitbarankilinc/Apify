@@ -5,9 +5,11 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 from typing import Optional
+import os
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
 def _suggest_filename(url: str) -> str:
@@ -45,6 +47,36 @@ def _unique_path(directory: Path, filename: str) -> Path:
     return directory / f"{stem}-{timestamp}{suffix}"
 
 
+def _build_request(url: str) -> Request:
+    """Prepare a browser-like request for the Kleinanzeigen listing.
+
+    If the site requires authenticated access, provide the session cookie via the
+    ``KLEINANZEIGEN_COOKIE`` environment variable so that the request header
+    includes it.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9," "image/avif,image/webp,image/apng,*/*;q=0.8"
+        ),
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.kleinanzeigen.de/",
+    }
+
+    cookie = os.getenv("KLEINANZEIGEN_COOKIE")
+    if cookie:
+        headers["Cookie"] = cookie
+
+    return Request(url, headers=headers)
+
+
 def download_listing(url: str) -> Path:
     """Fetch the listing URL and persist the HTML under `lisitings/`.
 
@@ -53,13 +85,21 @@ def download_listing(url: str) -> Path:
     if not url:
         raise ValueError("URL must not be empty")
 
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; KleinanzeigenFetcher/1.0)"})
+    request = _build_request(url)
 
     try:
-        with urlopen(request) as response:  # type: ignore[call-arg]
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        with opener.open(request) as response:  # type: ignore[call-arg]
             content = response.read()
     except HTTPError as exc:  # pragma: no cover - network errors depend on runtime
-        raise RuntimeError(f"HTTP error {exc.code} while fetching {url}") from exc
+        hint = ""
+        if exc.code == 403:
+            hint = (
+                ". Access denied – set the KLEINANZEIGEN_COOKIE environment "
+                "variable with a valid session cookie if the listing "
+                "requires authentication"
+            )
+        raise RuntimeError(f"HTTP error {exc.code} while fetching {url}{hint}") from exc
     except URLError as exc:  # pragma: no cover - network errors depend on runtime
         raise RuntimeError(f"Failed to reach {url}: {exc.reason}") from exc
 
