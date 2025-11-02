@@ -7,26 +7,40 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, List
+from typing import List, Sequence, Tuple
 
 from extract_listing import build_listing, parse_html
 from fetch_listing import download_listing
 
 
-def _run_link_scraper(url: str) -> None:
-    """Execute ``link_scraper.py`` and pass ``url`` to its prompt."""
-    try:
-        subprocess.run(
-            [sys.executable, "link_scraper.py"],
-            input=f"{url}\n",
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:  # pragma: no cover - CLI feedback only
+def _run_link_scraper(url: str) -> str:
+    """Execute ``link_scraper.py`` and return its final status line."""
+
+    result = subprocess.run(
+        [sys.executable, "link_scraper.py"],
+        input=f"{url}\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    output = (result.stdout or "").splitlines()
+
+    if result.returncode != 0:  # pragma: no cover - CLI feedback only
+        combined = "\n".join(output).strip()
+        if combined:
+            combined = f"\n{combined}"
         raise RuntimeError(
-            "link_scraper.py başarısız oldu; çıktı kaydedilemedi"
-        ) from exc
-    return None
+            "link_scraper.py başarısız oldu; çıktı kaydedilemedi" + combined
+        )
+
+    for line in reversed(output):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+
+    return "link_scraper tamamlandı."
 
 
 def _read_links(file_path: Path) -> List[str]:
@@ -44,17 +58,37 @@ def _read_links(file_path: Path) -> List[str]:
     return links
 
 
-def _download_links(links: Iterable[str]) -> List[Path]:
+def _print_progress(prefix: str, current: int, total: int) -> None:
+    """Render a single-line progress status like ``prefix: current/total``."""
+
+    message = f"{prefix}: {current}/{total}"
+    # Pad with spaces so shorter updates overwrite previous text.
+    sys.stdout.write("\r" + message + " " * 10)
+    sys.stdout.flush()
+
+
+def _download_links(links: Sequence[str], prefix: str) -> Tuple[List[Path], List[Tuple[str, str]]]:
+    total = len(links)
     saved: List[Path] = []
-    for link in links:
+    failures: List[Tuple[str, str]] = []
+
+    if total == 0:
+        return saved, failures
+
+    _print_progress(prefix, 0, total)
+
+    for index, link in enumerate(links, 1):
         try:
             path = download_listing(link)
         except Exception as exc:  # pragma: no cover - network variability
-            print(f"{link} indirilemedi: {exc}")
-            continue
-        print(f"{link} indirildi -> {path}")
-        saved.append(path)
-    return saved
+            failures.append((link, str(exc)))
+        else:
+            saved.append(path)
+
+        _print_progress(prefix, index, total)
+
+    print()
+    return saved, failures
 
 
 def _extract_from_html(html_path: Path) -> dict:
@@ -73,6 +107,59 @@ def _write_batch(batch: List[dict], batch_index: int, output_dir: Path) -> Path:
     return output_path
 
 
+def _process_listings(
+    html_paths: Sequence[Path],
+    output_dir: Path,
+    prefix: str,
+) -> Tuple[int, List[Tuple[str, str]], List[Path]]:
+    total = len(html_paths)
+    processed = 0
+    failures: List[Tuple[str, str]] = []
+    created_files: List[Path] = []
+
+    if total == 0:
+        return processed, failures, created_files
+
+    batch: List[dict] = []
+    batch_index = 1
+
+    _print_progress(prefix, 0, total)
+
+    for index, html_path in enumerate(html_paths, 1):
+        try:
+            listing = _extract_from_html(html_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            failures.append((str(html_path), str(exc)))
+        else:
+            batch.append(listing)
+            processed += 1
+
+        _print_progress(prefix, index, total)
+
+        if len(batch) == 27:
+            print()
+            output_path = _write_batch(batch, batch_index, output_dir)
+            created_files.append(output_path)
+            print(
+                f"    -> Paket {batch_index:03d} kaydedildi: {output_path.name} "
+                f"({processed} ilan işlendi)"
+            )
+            batch = []
+            batch_index += 1
+
+    print()
+
+    if batch:
+        output_path = _write_batch(batch, batch_index, output_dir)
+        created_files.append(output_path)
+        print(
+            f"    -> Paket {batch_index:03d} kaydedildi: {output_path.name} "
+            f"({len(batch)} ilan içeriyor)"
+        )
+
+    return processed, failures, created_files
+
+
 def main() -> None:
     url = input("Kleinanzeigen arama linki: ").strip()
     if not url:
@@ -81,11 +168,18 @@ def main() -> None:
 
     start_time = time.perf_counter()
 
+    total_stages = 3
+
+    print(f"[1/{total_stages}] Linkler toplanıyor...")
+
     try:
-        _run_link_scraper(url)
+        scraper_summary = _run_link_scraper(url)
     except RuntimeError as exc:
-        print(exc)
+        print(f"    Hata: {exc}")
         return
+
+    if scraper_summary:
+        print(f"    {scraper_summary}")
 
     links_file = Path("links.txt")
     try:
@@ -98,40 +192,43 @@ def main() -> None:
         print("links.txt içinde işlenecek link bulunamadı.")
         return
 
-    print(f"{len(links)} link bulundu. İndiriliyor...")
-    saved_html = _download_links(links)
+    download_prefix = f"[2/{total_stages}] HTML indiriliyor ({len(links)} link)"
+    saved_html, download_failures = _download_links(links, download_prefix)
+
+    if download_failures:
+        print(f"    {len(download_failures)} link indirilemedi:")
+        for link, message in download_failures[:3]:
+            print(f"      - {link}: {message}")
+        if len(download_failures) > 3:
+            print(f"      ... {len(download_failures) - 3} ek hata")
+
     if not saved_html:
         print("Herhangi bir HTML indirilemedi.")
         return
 
+    print(f"    {len(saved_html)} HTML dosyası indirildi.")
+
     output_dir = Path("Scraped_Daten")
-    batch: List[dict] = []
-    batch_index = 1
-    processed = 0
+    extraction_prefix = (
+        f"[3/{total_stages}] JSON verileri oluşturuluyor ({len(saved_html)} dosya)"
+    )
+    processed, extraction_failures, created_files = _process_listings(
+        saved_html, output_dir, extraction_prefix
+    )
 
-    for html_path in saved_html:
-        try:
-            listing = _extract_from_html(html_path)
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"{html_path} işlenemedi: {exc}")
-            continue
+    print(f"    {processed} ilan başarıyla işlendi.")
 
-        batch.append(listing)
-        processed += 1
+    if extraction_failures:
+        print(f"    {len(extraction_failures)} HTML işlenemedi:")
+        for path, message in extraction_failures[:3]:
+            print(f"      - {path}: {message}")
+        if len(extraction_failures) > 3:
+            print(f"      ... {len(extraction_failures) - 3} ek hata")
 
-        if len(batch) == 27:
-            output_path = _write_batch(batch, batch_index, output_dir)
-            print(
-                f"{batch_index}. JSON dosyası oluşturuldu ({output_path}) - {processed} ilan işlendi."
-            )
-            batch = []
-            batch_index += 1
-
-    if batch:
-        output_path = _write_batch(batch, batch_index, output_dir)
-        print(
-            f"{batch_index}. JSON dosyası oluşturuldu ({output_path}) - {len(batch)} ilan içeriyor."
-        )
+    if created_files:
+        print("    Oluşturulan JSON dosyaları:")
+        for json_path in created_files:
+            print(f"      - {json_path}")
 
     elapsed_seconds = time.perf_counter() - start_time
     total_seconds = round(elapsed_seconds)
