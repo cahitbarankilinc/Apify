@@ -6,11 +6,16 @@ import json
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
 from extract_listing import build_listing, parse_html
 from fetch_listing import download_listing
+
+WEBHOOK_URL = "https://cbarank0247.app.n8n.cloud/webhook-test/9b4a6bea-3f62-43b9-a031-742cbda93b0f"
+BATCH_SIZE = 15
 
 
 def _run_link_scraper(url: str) -> str:
@@ -99,26 +104,48 @@ def _extract_from_html(html_path: Path) -> dict:
     return data
 
 
-def _write_batch(batch: List[dict], batch_index: int, output_dir: Path) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"batch_{batch_index:03d}.json"
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(batch, handle, ensure_ascii=False, indent=2)
-    return output_path
+def _send_batch(batch: List[dict], batch_index: int, webhook_url: str) -> Tuple[bool, str]:
+    payload = {
+        "batch_index": batch_index,
+        "count": len(batch),
+        "listings": batch,
+    }
+    data = json.dumps(payload).encode("utf-8")
+
+    request = urllib.request.Request(
+        webhook_url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = response.getcode()
+            if 200 <= status < 300:
+                return True, ""
+            return False, f"HTTP durum kodu {status}"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTPError: {exc.code} - {exc.reason}"
+    except urllib.error.URLError as exc:
+        return False, f"URLError: {exc.reason}"
+    except TimeoutError:
+        return False, "Zaman aşımı"
 
 
 def _process_listings(
     html_paths: Sequence[Path],
-    output_dir: Path,
+    webhook_url: str,
     prefix: str,
-) -> Tuple[int, List[Tuple[str, str]], List[Path]]:
+) -> Tuple[int, List[Tuple[str, str]], List[int], List[Tuple[int, str]]]:
     total = len(html_paths)
     processed = 0
     failures: List[Tuple[str, str]] = []
-    created_files: List[Path] = []
+    sent_batches: List[int] = []
+    webhook_failures: List[Tuple[int, str]] = []
 
     if total == 0:
-        return processed, failures, created_files
+        return processed, failures, sent_batches, webhook_failures
 
     batch: List[dict] = []
     batch_index = 1
@@ -136,28 +163,42 @@ def _process_listings(
 
         _print_progress(prefix, index, total)
 
-        if len(batch) == 27:
+        if len(batch) == BATCH_SIZE:
             print()
-            output_path = _write_batch(batch, batch_index, output_dir)
-            created_files.append(output_path)
-            print(
-                f"    -> Paket {batch_index:03d} kaydedildi: {output_path.name} "
-                f"({processed} ilan işlendi)"
-            )
+            success, error_message = _send_batch(batch, batch_index, webhook_url)
+            if success:
+                sent_batches.append(batch_index)
+                print(
+                    f"    -> Paket {batch_index:03d} webhook'a gönderildi "
+                    f"({processed} ilan işlendi)"
+                )
+            else:
+                webhook_failures.append((batch_index, error_message))
+                print(
+                    f"    -> Paket {batch_index:03d} gönderilemedi: {error_message} "
+                    f"({processed} ilan işlendi)"
+                )
             batch = []
             batch_index += 1
 
     print()
 
     if batch:
-        output_path = _write_batch(batch, batch_index, output_dir)
-        created_files.append(output_path)
-        print(
-            f"    -> Paket {batch_index:03d} kaydedildi: {output_path.name} "
-            f"({len(batch)} ilan içeriyor)"
-        )
+        success, error_message = _send_batch(batch, batch_index, webhook_url)
+        if success:
+            sent_batches.append(batch_index)
+            print(
+                f"    -> Paket {batch_index:03d} webhook'a gönderildi "
+                f"({len(batch)} ilan içeriyor)"
+            )
+        else:
+            webhook_failures.append((batch_index, error_message))
+            print(
+                f"    -> Paket {batch_index:03d} gönderilemedi: {error_message} "
+                f"({len(batch)} ilan içeriyor)"
+            )
 
-    return processed, failures, created_files
+    return processed, failures, sent_batches, webhook_failures
 
 
 def main() -> None:
@@ -208,12 +249,11 @@ def main() -> None:
 
     print(f"    {len(saved_html)} HTML dosyası indirildi.")
 
-    output_dir = Path("Scraped_Daten")
     extraction_prefix = (
         f"[3/{total_stages}] JSON verileri oluşturuluyor ({len(saved_html)} dosya)"
     )
-    processed, extraction_failures, created_files = _process_listings(
-        saved_html, output_dir, extraction_prefix
+    processed, extraction_failures, sent_batches, webhook_failures = _process_listings(
+        saved_html, WEBHOOK_URL, extraction_prefix
     )
 
     print(f"    {processed} ilan başarıyla işlendi.")
@@ -225,10 +265,14 @@ def main() -> None:
         if len(extraction_failures) > 3:
             print(f"      ... {len(extraction_failures) - 3} ek hata")
 
-    if created_files:
-        print("    Oluşturulan JSON dosyaları:")
-        for json_path in created_files:
-            print(f"      - {json_path}")
+    if sent_batches:
+        print("    Webhook'a gönderilen paketler:")
+        for batch_index in sent_batches:
+            print(f"      - Paket {batch_index:03d}")
+    if webhook_failures:
+        print("    Webhook'a iletilemeyen paketler:")
+        for batch_index, message in webhook_failures:
+            print(f"      - Paket {batch_index:03d}: {message}")
 
     elapsed_seconds = time.perf_counter() - start_time
     total_seconds = round(elapsed_seconds)
