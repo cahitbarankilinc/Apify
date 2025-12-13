@@ -47,7 +47,19 @@ def _with_page(url: str, page: int) -> str:
         return f"{match.group(1)}{page}"
 
     updated = re.sub(r"(seite:)(\d+)", _repl, url, count=1)
-    return updated if updated != url or page == 1 else url
+    if updated != url or page == 1:
+        return updated
+
+    # If the original URL lacks an explicit ``seite:`` segment, insert one
+    # before the trailing path component (e.g., ``.../bmw/seite:2/k0c216...``)
+    if "/" not in url:
+        return f"{url}/seite:{page}"
+
+    head, tail = url.rsplit("/", 1)
+    if not tail:
+        return f"{url}seite:{page}"
+
+    return f"{head}/seite:{page}/{tail}"
 
 
 def _to_absolute(href: str) -> str:
