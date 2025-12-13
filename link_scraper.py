@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Iterable, List, Set
+from typing import Iterable, List, Optional, Set
+from urllib.parse import urljoin
 
 from extract_listing import Node, find_by_id, parse_html
 from fetch_listing import download_listing
@@ -70,6 +71,65 @@ def _with_page(url: str, page: int) -> str:
     return f"{head}/seite:{page}/{tail}"
 
 
+def _iter_nodes(node: Node) -> Iterable[Node]:
+    """Yield ``node`` and all of its descendants."""
+
+    yield node
+    for child in node.children:
+        yield from _iter_nodes(child)
+
+
+def _find_next_page(root: Node, current_url: str) -> Optional[str]:
+    """Return the next page URL if available.
+
+    Kleinanzeigen encodes pagination in different ways (``rel="next"`` links,
+    anchors with pagination-specific classes, and textual "Weiter" labels). The
+    scraper examines common patterns and converts relative links to absolute
+    URLs. ``None`` is returned when no next page is detected.
+    """
+
+    def _matches_pagination(anchor: Node, text: str) -> bool:
+        aria = anchor.attrs.get("aria-label", "").lower()
+        title = anchor.attrs.get("title", "").lower()
+        classes = set(anchor.class_list())
+        rel_attr = anchor.attrs.get("rel", "")
+        rel_values = {value.strip().lower() for value in rel_attr.split()} if rel_attr else set()
+
+        patterns = [aria, title, text]
+        if any(keyword in value for value in patterns for keyword in ("weiter", "next")):
+            return True
+
+        pagination_classes = {cls for cls in classes if "pagination" in cls or cls.endswith("__next")}
+        if pagination_classes:
+            return True
+
+        if "next" in rel_values:
+            return True
+
+        return False
+
+    for node in _iter_nodes(root):
+        if node.tag not in {"a", "link"}:
+            continue
+
+        href = node.attrs.get("href")
+        if not href:
+            continue
+
+        if node.tag == "link":
+            rel_attr = node.attrs.get("rel", "")
+            rel_values = {value.strip().lower() for value in rel_attr.split()}
+            if "next" in rel_values:
+                return urljoin(current_url, href)
+            continue
+
+        text = " ".join(part.strip() for part in node.iter_text() if part.strip()).lower()
+        if _matches_pagination(node, text):
+            return urljoin(current_url, href)
+
+    return None
+
+
 def _to_absolute(href: str) -> str:
     """Ensure listing links use an absolute Kleinanzeigen URL."""
 
@@ -87,15 +147,12 @@ def main() -> None:
     collected_links: List[str] = []
     seen_links: Set[str] = set()
 
-    previous_url = None
-    for page in range(1, 51):
-        page_url = _with_page(url, page)
+    page = 1
+    page_url = url
+    visited_pages: Set[str] = set()
 
-        if page > 1 and page_url == previous_url:
-            print("No additional pages detected; stopping pagination.")
-            break
-
-        previous_url = page_url
+    while page_url and page_url not in visited_pages:
+        visited_pages.add(page_url)
 
         try:
             saved_path = download_listing(page_url)
@@ -109,18 +166,28 @@ def main() -> None:
 
         if not page_links:
             print(f"No listing links found on page {page}. Continuing.")
-            continue
+        else:
+            new_for_page = 0
+            for href in page_links:
+                absolute = _to_absolute(href)
+                if absolute in seen_links:
+                    continue
+                seen_links.add(absolute)
+                collected_links.append(absolute)
+                new_for_page += 1
 
-        new_for_page = 0
-        for href in page_links:
-            absolute = _to_absolute(href)
-            if absolute in seen_links:
-                continue
-            seen_links.add(absolute)
-            collected_links.append(absolute)
-            new_for_page += 1
+            print(f"Processed page {page}: added {new_for_page} new link(s).")
 
-        print(f"Processed page {page}: added {new_for_page} new link(s).")
+        next_url = _find_next_page(root, page_url)
+        if next_url is None:
+            fallback_url = _with_page(url, page + 1)
+            if fallback_url in visited_pages or fallback_url == page_url:
+                print("No additional pages detected; stopping pagination.")
+                break
+            next_url = fallback_url
+
+        page += 1
+        page_url = next_url
 
     if not collected_links:
         print("No listing links found in the provided pages.")
