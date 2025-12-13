@@ -41,13 +41,33 @@ def _collect_listing_links(root: Node) -> List[str]:
 
 
 def _with_page(url: str, page: int) -> str:
-    """Return ``url`` with the first ``seite:`` occurrence replaced by ``page``."""
+    """Return ``url`` with a usable pagination segment for ``page``."""
 
     def _repl(match: re.Match) -> str:
         return f"{match.group(1)}{page}"
 
     updated = re.sub(r"(seite:)(\d+)", _repl, url, count=1)
-    return updated if updated != url or page == 1 else url
+    if updated != url or page == 1:
+        return updated
+
+    # If the URL already carries query parameters, prefer the explicit ``page``
+    # query knob because some Kleinanzeigen variations route pagination there.
+    if "?" in url:
+        separator = "&" if not url.endswith("?") else ""
+        return f"{url}{separator}page={page}"
+
+    # If the original URL lacks an explicit ``seite:`` segment, insert one
+    # before the trailing path component. For Kleinanzeigen search URLs this
+    # usually places the segment immediately before the filter block (e.g.,
+    # ``.../bmw/seite:2/k0c216l7611r20``).
+    if "/" not in url:
+        return f"{url}/seite:{page}"
+
+    head, tail = url.rsplit("/", 1)
+    if not tail:
+        return f"{url}seite:{page}"
+
+    return f"{head}/seite:{page}/{tail}"
 
 
 def _to_absolute(href: str) -> str:
