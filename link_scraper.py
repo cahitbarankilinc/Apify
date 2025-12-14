@@ -2,9 +2,10 @@
 """Fetch a Kleinanzeigen search page and extract listing links."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
-from typing import Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import urljoin
 
 from extract_listing import Node, find_by_id, parse_html
@@ -19,13 +20,33 @@ def _iter_articles(node: Node) -> Iterable[Node]:
         yield from _iter_articles(child)
 
 
-def _collect_listing_links(root: Node) -> List[str]:
-    """Return the ``data-href`` values for the result articles."""
+def _extract_distance(article: Node) -> Optional[str]:
+    """Return the distance text (e.g., "322 km") for a result article."""
+
+    def _iter_nodes(node: Node) -> Iterable[Node]:
+        yield node
+        for child in node.children:
+            yield from _iter_nodes(child)
+
+    for node in _iter_nodes(article):
+        classes = set(node.class_list())
+        if "aditem-main--top--left" not in classes and "aditem-main" not in classes:
+            continue
+
+        text = " ".join(part.strip() for part in node.iter_text() if part.strip())
+        match = re.search(r"\(([^)]*?km)\)", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _collect_listing_links(root: Node) -> List[tuple[str, Optional[str]]]:
+    """Return pairs of ``data-href`` values and their distances."""
     container = find_by_id(root, "srchrslt-adtable")
     if container is None:
         return []
 
-    links: List[str] = []
+    links: List[tuple[str, Optional[str]]] = []
     seen: Set[str] = set()
     for item in container.children:
         if item.tag != "li":
@@ -34,7 +55,7 @@ def _collect_listing_links(root: Node) -> List[str]:
             href = article.attrs.get("data-href")
             if href and href not in seen:
                 seen.add(href)
-                links.append(href)
+                links.append((href, _extract_distance(article)))
             # Only keep the first article per list item to avoid duplicates.
             break
 
@@ -145,6 +166,7 @@ def main() -> None:
         return
 
     collected_links: List[str] = []
+    collected_metadata: List[Dict[str, str]] = []
     seen_links: Set[str] = set()
 
     page = 1
@@ -168,12 +190,16 @@ def main() -> None:
             print(f"No listing links found on page {page}. Continuing.")
         else:
             new_for_page = 0
-            for href in page_links:
+            for href, distance in page_links:
                 absolute = _to_absolute(href)
                 if absolute in seen_links:
                     continue
                 seen_links.add(absolute)
                 collected_links.append(absolute)
+                entry: Dict[str, str] = {"url": absolute}
+                if distance:
+                    entry["Abstand"] = distance
+                collected_metadata.append(entry)
                 new_for_page += 1
 
             print(f"Processed page {page}: added {new_for_page} new link(s).")
@@ -215,6 +241,29 @@ def main() -> None:
     with output_path.open("w", encoding="utf-8") as handle:
         for href in combined_links:
             handle.write(f"{href},\n")
+
+    metadata_path = Path("links_metadata.json")
+    existing_metadata: List[Dict[str, str]] = []
+    if metadata_path.exists():
+        try:
+            existing_data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if isinstance(existing_data, list):
+                for item in existing_data:
+                    if isinstance(item, dict) and "url" in item:
+                        existing_metadata.append({k: str(v) for k, v in item.items() if isinstance(k, str)})
+        except json.JSONDecodeError:
+            pass
+
+    existing_index = {entry.get("url"): entry for entry in existing_metadata if "url" in entry}
+    for entry in collected_metadata:
+        url = entry["url"]
+        if url not in existing_index:
+            existing_metadata.append(entry)
+            existing_index[url] = entry
+        elif "Abstand" in entry and "Abstand" not in existing_index[url]:
+            existing_index[url]["Abstand"] = entry["Abstand"]
+
+    metadata_path.write_text(json.dumps(existing_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(
         f"Added {len(new_links)} new link(s). {len(combined_links)} total entries saved to {output_path}."

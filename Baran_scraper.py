@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from extract_listing import build_listing, parse_html
 from fetch_listing import download_listing
@@ -63,6 +63,28 @@ def _read_links(file_path: Path) -> List[str]:
     return links
 
 
+def _load_distances(file_path: Path) -> Dict[str, str]:
+    if not file_path.exists():
+        return {}
+
+    try:
+        raw = json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    distances: Dict[str, str] = {}
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            distance = entry.get("Abstand")
+            if isinstance(url, str) and isinstance(distance, str) and distance.strip():
+                distances[url.strip()] = distance.strip()
+
+    return distances
+
+
 def _print_progress(prefix: str, current: int, total: int) -> None:
     """Render a single-line progress status like ``prefix: current/total``."""
 
@@ -72,9 +94,11 @@ def _print_progress(prefix: str, current: int, total: int) -> None:
     sys.stdout.flush()
 
 
-def _download_links(links: Sequence[str], prefix: str) -> Tuple[List[Path], List[Tuple[str, str]]]:
+def _download_links(
+    links: Sequence[str], prefix: str
+) -> Tuple[List[Tuple[str, Path]], List[Tuple[str, str]]]:
     total = len(links)
-    saved: List[Path] = []
+    saved: List[Tuple[str, Path]] = []
     failures: List[Tuple[str, str]] = []
 
     if total == 0:
@@ -88,7 +112,7 @@ def _download_links(links: Sequence[str], prefix: str) -> Tuple[List[Path], List
         except Exception as exc:  # pragma: no cover - network variability
             failures.append((link, str(exc)))
         else:
-            saved.append(path)
+            saved.append((link, path))
 
         _print_progress(prefix, index, total)
 
@@ -96,10 +120,12 @@ def _download_links(links: Sequence[str], prefix: str) -> Tuple[List[Path], List
     return saved, failures
 
 
-def _extract_from_html(html_path: Path) -> dict:
+def _extract_from_html(html_path: Path, distance: str | None = None) -> dict:
     html = html_path.read_text(encoding="utf-8", errors="replace")
     root = parse_html(html)
     data = build_listing(root)
+    if distance:
+        data["Abstand"] = distance
     data["source_html"] = str(html_path)
     return data
 
@@ -134,7 +160,8 @@ def _send_batch(batch: List[dict], batch_index: int, webhook_url: str) -> Tuple[
 
 
 def _process_listings(
-    html_paths: Sequence[Path],
+    html_paths: Sequence[Tuple[str, Path]],
+    distances: Dict[str, str],
     webhook_url: str,
     prefix: str,
 ) -> Tuple[int, List[Tuple[str, str]], List[int], List[Tuple[int, str]]]:
@@ -152,9 +179,9 @@ def _process_listings(
 
     _print_progress(prefix, 0, total)
 
-    for index, html_path in enumerate(html_paths, 1):
+    for index, (link, html_path) in enumerate(html_paths, 1):
         try:
-            listing = _extract_from_html(html_path)
+            listing = _extract_from_html(html_path, distances.get(link))
         except Exception as exc:  # pragma: no cover - defensive
             failures.append((str(html_path), str(exc)))
         else:
@@ -237,6 +264,8 @@ def main() -> None:
         print("links.txt içinde işlenecek link bulunamadı.")
         return
 
+    distances = _load_distances(Path("links_metadata.json"))
+
     download_prefix = f"[2/{total_stages}] HTML indiriliyor ({len(links)} link)"
     saved_html, download_failures = _download_links(links, download_prefix)
 
@@ -257,7 +286,7 @@ def main() -> None:
         f"[3/{total_stages}] JSON verileri oluşturuluyor ({len(saved_html)} dosya)"
     )
     processed, extraction_failures, sent_batches, webhook_failures = _process_listings(
-        saved_html, WEBHOOK_URL, extraction_prefix
+        saved_html, distances, WEBHOOK_URL, extraction_prefix
     )
 
     print(f"    {processed} ilan başarıyla işlendi.")
