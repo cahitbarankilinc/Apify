@@ -172,8 +172,12 @@ def main() -> None:
     page = 1
     page_url = url
     visited_pages: Set[str] = set()
+    max_pages = 50
 
-    while page_url and page_url not in visited_pages:
+    while page_url and page <= max_pages:
+        if page_url in visited_pages:
+            print("No additional pages detected; stopping pagination.")
+            break
         visited_pages.add(page_url)
 
         try:
@@ -206,11 +210,11 @@ def main() -> None:
 
         next_url = _find_next_page(root, page_url)
         if next_url is None:
-            fallback_url = _with_page(url, page + 1)
-            if fallback_url in visited_pages or fallback_url == page_url:
-                print("No additional pages detected; stopping pagination.")
-                break
-            next_url = fallback_url
+            next_url = _with_page(url, page + 1)
+
+        if next_url in visited_pages or next_url == page_url:
+            print("No additional pages detected; stopping pagination.")
+            break
 
         page += 1
         page_url = next_url
